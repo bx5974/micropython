@@ -38,6 +38,9 @@ typedef struct _mp_bluetooth_nimble_root_pointers_t {
     // Pending service definitions.
     size_t n_services;
     struct ble_gatt_svc_def *services[MP_BLUETOOTH_NIMBLE_MAX_SERVICES];
+
+    // L2CAP channels.
+    struct _mp_bluetooth_nimble_l2cap_channel_t *l2cap_chan;
 } mp_bluetooth_nimble_root_pointers_t;
 
 enum {

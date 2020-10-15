@@ -1084,4 +1084,233 @@ int mp_bluetooth_gattc_exchange_mtu(uint16_t conn_handle) {
 
 #endif // MICROPY_PY_BLUETOOTH_ENABLE_CENTRAL_MODE
 
+#if MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+
+// This gives us enough room to have one MTU-size transmit buffers and two MTU-sized receive buffers.
+#define L2CAP_BUF_COUNT (3)
+
+typedef struct _mp_bluetooth_nimble_l2cap_channel_t {
+    struct ble_l2cap_chan *chan;
+    struct os_mbuf_pool sdu_mbuf_pool;
+    struct os_mempool sdu_mempool;
+    struct os_mbuf *rx_pending;
+    uint16_t mtu;
+    os_membuf_t sdu_mem[];
+} mp_bluetooth_nimble_l2cap_channel_t;
+
+int l2cap_event(struct ble_l2cap_event *event, void *arg) {
+    DEBUG_printf("l2cap_event: type=%d\n", event->type);
+    mp_bluetooth_nimble_l2cap_channel_t* chan = (mp_bluetooth_nimble_l2cap_channel_t*)arg;
+    uint8_t buf[1024];
+
+    switch (event->type) {
+        case BLE_L2CAP_EVENT_COC_CONNECTED: {
+            DEBUG_printf("l2cap_event: connect: conn_handle=%d status=%d\n", event->connect.conn_handle, event->connect.status);
+            chan->chan = event->connect.chan;
+            mp_bluetooth_gattc_on_l2cap_generic(MP_BLUETOOTH_IRQ_L2CAP_CONNECT, 0);
+            break;
+        }
+        case BLE_L2CAP_EVENT_COC_DISCONNECTED: {
+            DEBUG_printf("l2cap_event: disconnect: conn_handle=%d\n", event->disconnect.conn_handle);
+            MP_STATE_PORT(bluetooth_nimble_root_pointers)->l2cap_chan = NULL;
+            mp_bluetooth_gattc_on_l2cap_generic(MP_BLUETOOTH_IRQ_L2CAP_DISCONNECT, 0);
+            break;
+        }
+        case BLE_L2CAP_EVENT_COC_ACCEPT: {
+            DEBUG_printf("l2cap_event: accept: conn_handle=%d peer_sdu_size=%d\n", event->accept.conn_handle, event->accept.peer_sdu_size);
+            chan->chan = event->accept.chan;
+            mp_bluetooth_gattc_on_l2cap_generic(MP_BLUETOOTH_IRQ_L2CAP_ACCEPT, 0);
+            struct os_mbuf *sdu_rx = os_mbuf_get_pkthdr(&chan->sdu_mbuf_pool, 0);
+            return ble_l2cap_recv_ready(chan->chan, sdu_rx);
+        }
+        case BLE_L2CAP_EVENT_COC_DATA_RECEIVED: {
+            DEBUG_printf("l2cap_event: receive: conn_handle=%d len=%d\n", event->receive.conn_handle, OS_MBUF_PKTLEN(event->receive.sdu_rx));
+
+            os_mbuf_copydata(event->receive.sdu_rx, 0, 1024, buf);
+
+            if (chan->rx_pending) {
+                // This shouldn't happen (because we don't call
+                // ble_l2cap_recv_ready until the pending buffer is emptied
+                // via recvinto).
+                printf("l2cap_event: receive: appending to rx pending\n");
+                os_mbuf_concat(chan->rx_pending, event->receive.sdu_rx);
+            } else {
+                // printf("l2cap_event: receive: new payload\n");
+                chan->rx_pending = event->receive.sdu_rx;
+            }
+            mp_bluetooth_gattc_on_l2cap_generic(MP_BLUETOOTH_IRQ_L2CAP_RECV, 0);
+            break;
+        }
+        case BLE_L2CAP_EVENT_COC_TX_UNSTALLED: {
+            DEBUG_printf("l2cap_event: tx_unstalled: conn_handle=%d status=%d\n", event->tx_unstalled.conn_handle, event->tx_unstalled.status);
+            mp_bluetooth_gattc_on_l2cap_tx_unstalled(0, event->tx_unstalled.status);
+            break;
+        }
+        case BLE_L2CAP_EVENT_COC_RECONFIG_COMPLETED: {
+            DEBUG_printf("l2cap_event: reconfig_completed: conn_handle=%d\n", event->reconfigured.conn_handle);
+            break;
+        }
+        case BLE_L2CAP_EVENT_COC_PEER_RECONFIGURED: {
+            DEBUG_printf("l2cap_event: peer_reconfigured: conn_handle=%d\n", event->reconfigured.conn_handle);
+            break;
+        }
+        default: {
+            DEBUG_printf("l2cap_event: unknown event\n");
+            break;
+        }
+    }
+
+    return 0;
+}
+
+STATIC mp_bluetooth_nimble_l2cap_channel_t* get_l2cap_channel_from_handle(uint16_t chan_handle) {
+    if (chan_handle != 0) {
+        // TODO: Support more than one concurrent L2CAP channel.
+        return NULL;
+    }
+    return MP_STATE_PORT(bluetooth_nimble_root_pointers)->l2cap_chan;
+}
+
+STATIC int create_l2cap_channel(uint16_t mtu, mp_bluetooth_nimble_l2cap_channel_t **out) {
+    if (MP_STATE_PORT(bluetooth_nimble_root_pointers)->l2cap_chan) {
+        // Only one L2CAP channel allowed.
+        // Additionally, if we're listening, then no connections may be initiated.
+        DEBUG_printf("create_l2cap_channel: channel already in use\n");
+        return MP_EALREADY;
+    }
+
+    mp_bluetooth_nimble_l2cap_channel_t *chan = m_new_obj_var(mp_bluetooth_nimble_l2cap_channel_t, uint8_t, OS_MEMPOOL_SIZE(L2CAP_BUF_COUNT, mtu) * sizeof(os_membuf_t));
+    MP_STATE_PORT(bluetooth_nimble_root_pointers)->l2cap_chan = chan;
+
+    // Will be set in BLE_L2CAP_EVENT_COC_CONNECTED or BLE_L2CAP_EVENT_COC_ACCEPT.
+    chan->chan = NULL;
+
+    chan->mtu = mtu;
+    chan->rx_pending = NULL;
+
+    int err = os_mempool_init(&chan->sdu_mempool, L2CAP_BUF_COUNT, mtu, chan->sdu_mem, "l2cap_sdu_pool");
+    if (err != 0) {
+        DEBUG_printf("mp_bluetooth_l2cap_connect: os_mempool_init failed %d\n", err);
+        return MP_ENOMEM;
+    }
+
+    err = os_mbuf_pool_init(&chan->sdu_mbuf_pool, &chan->sdu_mempool, mtu, L2CAP_BUF_COUNT);
+    if (err != 0) {
+        DEBUG_printf("mp_bluetooth_l2cap_connect: os_mbuf_pool_init failed %d\n", err);
+        return MP_ENOMEM;
+    }
+
+    *out = chan;
+    return 0;
+}
+
+int mp_bluetooth_l2cap_listen(uint16_t psm, uint16_t mtu) {
+    DEBUG_printf("mp_bluetooth_l2cap_listen: psm=%d, mtu=%d\n", psm, mtu);
+
+    mp_bluetooth_nimble_l2cap_channel_t *chan;
+    int err = create_l2cap_channel(mtu, &chan);
+    if (err != 0) {
+        return err;
+    }
+
+    return ble_hs_err_to_errno(ble_l2cap_create_server(psm, mtu, &l2cap_event, chan));
+}
+
+int mp_bluetooth_l2cap_connect(uint16_t conn_handle, uint16_t psm, uint16_t mtu) {
+    DEBUG_printf("mp_bluetooth_l2cap_connect: conn_handle=%d, psm=%d, mtu=%d\n", conn_handle, psm, mtu);
+
+    mp_bluetooth_nimble_l2cap_channel_t *chan;
+    int err = create_l2cap_channel(mtu, &chan);
+    if (err != 0) {
+        return err;
+    }
+
+    struct os_mbuf *sdu_rx = os_mbuf_get_pkthdr(&chan->sdu_mbuf_pool, 0);
+    return ble_hs_err_to_errno(ble_l2cap_connect(conn_handle, psm, mtu, sdu_rx, &l2cap_event, chan));
+}
+
+int mp_bluetooth_l2cap_disconnect(uint16_t chan_handle) {
+    DEBUG_printf("mp_bluetooth_l2cap_disconnect: chan_handle=%d\n", chan_handle);
+    mp_bluetooth_nimble_l2cap_channel_t* chan = get_l2cap_channel_from_handle(chan_handle);
+    if (!chan) {
+        return MP_EINVAL;
+    }
+    return ble_hs_err_to_errno(ble_l2cap_disconnect(chan->chan));
+}
+
+int mp_bluetooth_l2cap_send(uint16_t chan_handle, const uint8_t *buf, size_t len, bool *stalled) {
+    DEBUG_printf("mp_bluetooth_l2cap_send: chan_handle=%d, len=%d\n", chan_handle, (int)len);
+
+    mp_bluetooth_nimble_l2cap_channel_t* chan = get_l2cap_channel_from_handle(chan_handle);
+    if (!chan) {
+        return MP_EINVAL;
+    }
+
+    struct os_mbuf *sdu_tx = os_mbuf_get_pkthdr(&chan->sdu_mbuf_pool, 0);
+    if (sdu_tx == NULL) {
+        return MP_ENOMEM;
+    }
+
+    int err = os_mbuf_append(sdu_tx, buf, len);
+    if (err) {
+        os_mbuf_free_chain(sdu_tx);
+        return MP_ENOMEM;
+    }
+
+    err = ble_l2cap_send(chan->chan, sdu_tx);
+    if (err == BLE_HS_ESTALLED) {
+        *stalled = true;
+        err = 0;
+    } else {
+        *stalled = false;
+    }
+    return ble_hs_err_to_errno(err);
+}
+
+int mp_bluetooth_l2cap_recvinto(uint16_t chan_handle, uint8_t *buf, size_t *len) {
+    mp_bluetooth_nimble_l2cap_channel_t* chan = get_l2cap_channel_from_handle(chan_handle);
+    if (!chan) {
+        return MP_EINVAL;
+    }
+
+    MICROPY_PY_BLUETOOTH_ENTER
+    if (chan->rx_pending) {
+        size_t avail = OS_MBUF_PKTLEN(chan->rx_pending);
+
+        if (buf == NULL) {
+            // Can use this to implement a poll - just find out how much is available.
+            *len = avail;
+        } else {
+            // Have dest buffer and data available.
+            // Figure out how much we should copy.
+            *len = min(*len, avail);
+
+            // Extract the required number of bytes.
+            os_mbuf_copydata(chan->rx_pending, 0, *len, buf);
+
+            if (*len == avail) {
+                // That's all that's available -- free this mbuf and re-enable receiving with a new mbuf.
+                os_mbuf_free_chain(chan->rx_pending);
+                chan->rx_pending = NULL;
+                struct os_mbuf *sdu_rx = os_mbuf_get_pkthdr(&chan->sdu_mbuf_pool, 0);
+                ble_l2cap_recv_ready(chan->chan, sdu_rx);
+            } else {
+                // Trim the used bytes from the start of the mbuf.
+                // Positive argument means "trim this many from head".
+                os_mbuf_adj(chan->rx_pending, *len);
+                // Clean up any empty mbufs at the head.
+                os_mbuf_trim_front(chan->rx_pending);
+            }
+        }
+    } else {
+        // No pending data.
+        *len = 0;
+    }
+
+    MICROPY_PY_BLUETOOTH_EXIT
+    return 0;
+}
+
+#endif // MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+
 #endif // MICROPY_PY_BLUETOOTH && MICROPY_BLUETOOTH_NIMBLE

@@ -782,6 +782,64 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_2(bluetooth_ble_gattc_exchange_mtu_obj, bluetooth
 
 #endif // MICROPY_PY_BLUETOOTH_ENABLE_CENTRAL_MODE
 
+#if MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+
+STATIC mp_obj_t bluetooth_ble_l2cap_listen(mp_obj_t self_in, mp_obj_t psm_in, mp_obj_t mtu_in) {
+    (void)self_in;
+    mp_int_t psm = mp_obj_get_int(psm_in);
+    mp_int_t mtu = mp_obj_get_int(mtu_in);
+    return bluetooth_handle_errno(mp_bluetooth_l2cap_listen(psm, mtu));
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_3(bluetooth_ble_l2cap_listen_obj, bluetooth_ble_l2cap_listen);
+
+STATIC mp_obj_t bluetooth_ble_l2cap_connect(size_t n_args, const mp_obj_t *args) {
+    mp_int_t conn_handle = mp_obj_get_int(args[1]);
+    mp_int_t psm = mp_obj_get_int(args[2]);
+    mp_int_t mtu = mp_obj_get_int(args[3]);
+    mp_int_t rxbuf = 0;
+    if (n_args >= 5) {
+        rxbuf = mp_obj_get_int(args[4]);
+    }
+    (void)rxbuf;
+    return bluetooth_handle_errno(mp_bluetooth_l2cap_connect(conn_handle, psm, mtu));
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(bluetooth_ble_l2cap_connect_obj, 4, 5, bluetooth_ble_l2cap_connect);
+
+STATIC mp_obj_t bluetooth_ble_l2cap_disconnect(mp_obj_t self_in, mp_obj_t chan_handle_in) {
+    (void)self_in;
+    mp_int_t chan_handle = mp_obj_get_int(chan_handle_in);
+    return bluetooth_handle_errno(mp_bluetooth_l2cap_disconnect(chan_handle));
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_2(bluetooth_ble_l2cap_disconnect_obj, bluetooth_ble_l2cap_disconnect);
+
+STATIC mp_obj_t bluetooth_ble_l2cap_send(mp_obj_t self_in, mp_obj_t chan_handle_in, mp_obj_t data_in) {
+    (void)self_in;
+    mp_int_t chan_handle = mp_obj_get_int(chan_handle_in);
+    mp_buffer_info_t bufinfo = {0};
+    mp_get_buffer_raise(data_in, &bufinfo, MP_BUFFER_READ);
+    bool stalled = false;
+    bluetooth_handle_errno(mp_bluetooth_l2cap_send(chan_handle, bufinfo.buf, bufinfo.len, &stalled));
+    return mp_obj_new_bool(stalled);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_3(bluetooth_ble_l2cap_send_obj, bluetooth_ble_l2cap_send);
+
+STATIC mp_obj_t bluetooth_ble_l2cap_recvinto(mp_obj_t self_in, mp_obj_t chan_handle_in, mp_obj_t data_in) {
+    (void)self_in;
+    mp_int_t chan_handle = mp_obj_get_int(chan_handle_in);
+
+    mp_buffer_info_t bufinfo = {0};
+
+    if (data_in != mp_const_none) {
+        mp_get_buffer_raise(data_in, &bufinfo, MP_BUFFER_WRITE);
+    }
+
+    bluetooth_handle_errno(mp_bluetooth_l2cap_recvinto(chan_handle, bufinfo.buf, &bufinfo.len));
+    return MP_OBJ_NEW_SMALL_INT(bufinfo.len);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_3(bluetooth_ble_l2cap_recvinto_obj, bluetooth_ble_l2cap_recvinto);
+
+#endif // MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+
 // ----------------------------------------------------------------------------
 // Bluetooth object: Definition
 // ----------------------------------------------------------------------------
@@ -813,6 +871,13 @@ STATIC const mp_rom_map_elem_t bluetooth_ble_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_gattc_read), MP_ROM_PTR(&bluetooth_ble_gattc_read_obj) },
     { MP_ROM_QSTR(MP_QSTR_gattc_write), MP_ROM_PTR(&bluetooth_ble_gattc_write_obj) },
     { MP_ROM_QSTR(MP_QSTR_gattc_exchange_mtu), MP_ROM_PTR(&bluetooth_ble_gattc_exchange_mtu_obj) },
+    #endif
+    #if MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+    { MP_ROM_QSTR(MP_QSTR_l2cap_listen), MP_ROM_PTR(&bluetooth_ble_l2cap_listen_obj) },
+    { MP_ROM_QSTR(MP_QSTR_l2cap_connect), MP_ROM_PTR(&bluetooth_ble_l2cap_connect_obj) },
+    { MP_ROM_QSTR(MP_QSTR_l2cap_disconnect), MP_ROM_PTR(&bluetooth_ble_l2cap_disconnect_obj) },
+    { MP_ROM_QSTR(MP_QSTR_l2cap_send), MP_ROM_PTR(&bluetooth_ble_l2cap_send_obj) },
+    { MP_ROM_QSTR(MP_QSTR_l2cap_recvinto), MP_ROM_PTR(&bluetooth_ble_l2cap_recvinto_obj) },
     #endif
 };
 STATIC MP_DEFINE_CONST_DICT(bluetooth_ble_locals_dict, bluetooth_ble_locals_dict_table);
@@ -949,6 +1014,23 @@ STATIC mp_obj_t bluetooth_ble_invoke_irq(mp_obj_t none_in) {
             // conn_handle, value_handle, status
             ringbuf_extract(&o->ringbuf, data_tuple, 3, 0, NULL, 0, NULL, NULL);
         #endif // MICROPY_PY_BLUETOOTH_ENABLE_CENTRAL_MODE
+        #if MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+        } else if (event == MP_BLUETOOTH_IRQ_L2CAP_ACCEPT) {
+            // chan_handle
+            ringbuf_extract(&o->ringbuf, data_tuple, 1, 0, NULL, 0, NULL, NULL);
+        } else if (event == MP_BLUETOOTH_IRQ_L2CAP_CONNECT) {
+            // chan_handle
+            ringbuf_extract(&o->ringbuf, data_tuple, 1, 0, NULL, 0, NULL, NULL);
+        } else if (event == MP_BLUETOOTH_IRQ_L2CAP_DISCONNECT) {
+            // chan_handle
+            ringbuf_extract(&o->ringbuf, data_tuple, 1, 0, NULL, 0, NULL, NULL);
+        } else if (event == MP_BLUETOOTH_IRQ_L2CAP_RECV) {
+            // chan_handle
+            ringbuf_extract(&o->ringbuf, data_tuple, 1, 0, NULL, 0, NULL, NULL);
+        } else if (event == MP_BLUETOOTH_IRQ_L2CAP_TX_UNSTALLED) {
+            // chan_handle, status
+            ringbuf_extract(&o->ringbuf, data_tuple, 1, 1, NULL, 0, NULL, NULL);
+        #endif // MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
         }
 
         MICROPY_PY_BLUETOOTH_EXIT
@@ -1205,6 +1287,27 @@ void mp_bluetooth_gatts_on_mtu_exchanged(uint16_t conn_handle, uint16_t value) {
     }
     schedule_ringbuf(atomic_state);
 }
+
+#if MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+void mp_bluetooth_gattc_on_l2cap_generic(uint8_t event, uint16_t chan_handle) {
+    MICROPY_PY_BLUETOOTH_ENTER
+    mp_obj_bluetooth_ble_t *o = MP_OBJ_TO_PTR(MP_STATE_VM(bluetooth));
+    if (enqueue_irq(o, 2, event)) {
+        ringbuf_put16(&o->ringbuf, chan_handle);
+    }
+    schedule_ringbuf(atomic_state);
+}
+
+void mp_bluetooth_gattc_on_l2cap_tx_unstalled(uint16_t chan_handle, uint8_t status) {
+    MICROPY_PY_BLUETOOTH_ENTER
+    mp_obj_bluetooth_ble_t *o = MP_OBJ_TO_PTR(MP_STATE_VM(bluetooth));
+    if (enqueue_irq(o, 2 + 1, MP_BLUETOOTH_IRQ_L2CAP_TX_UNSTALLED)) {
+        ringbuf_put16(&o->ringbuf, chan_handle);
+        ringbuf_put(&o->ringbuf, status);
+    }
+    schedule_ringbuf(atomic_state);
+}
+#endif // MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
 
 void mp_bluetooth_gatts_db_create_entry(mp_gatts_db_t db, uint16_t handle, size_t len) {
     mp_map_elem_t *elem = mp_map_lookup(db, MP_OBJ_NEW_SMALL_INT(handle), MP_MAP_LOOKUP_ADD_IF_NOT_FOUND);

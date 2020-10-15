@@ -47,6 +47,10 @@
 #define MICROPY_PY_BLUETOOTH_GATTS_ON_READ_CALLBACK (0)
 #endif
 
+#ifndef MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+#define MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL (0)
+#endif
+
 // This is used to protect the ringbuffer.
 #ifndef MICROPY_PY_BLUETOOTH_ENTER
 #define MICROPY_PY_BLUETOOTH_ENTER mp_uint_t atomic_state = MICROPY_BEGIN_ATOMIC_SECTION();
@@ -101,6 +105,11 @@
 #define MP_BLUETOOTH_IRQ_GATTC_INDICATE                 (19)
 #define MP_BLUETOOTH_IRQ_GATTS_INDICATE_DONE            (20)
 #define MP_BLUETOOTH_IRQ_MTU_EXCHANGED                  (21)
+#define MP_BLUETOOTH_IRQ_L2CAP_ACCEPT                   (22)
+#define MP_BLUETOOTH_IRQ_L2CAP_CONNECT                  (23)
+#define MP_BLUETOOTH_IRQ_L2CAP_DISCONNECT               (24)
+#define MP_BLUETOOTH_IRQ_L2CAP_RECV                     (25)
+#define MP_BLUETOOTH_IRQ_L2CAP_TX_UNSTALLED             (26)
 
 #define MP_BLUETOOTH_ADDRESS_MODE_PUBLIC (0)
 #define MP_BLUETOOTH_ADDRESS_MODE_RANDOM (1)
@@ -133,6 +142,11 @@ _IRQ_GATTC_NOTIFY = const(18)
 _IRQ_GATTC_INDICATE = const(19)
 _IRQ_GATTS_INDICATE_DONE = const(20)
 _IRQ_MTU_EXCHANGED = const(21)
+_IRQ_L2CAP_ACCEPT = const(22)
+_IRQ_L2CAP_CONNECT = const(23)
+_IRQ_L2CAP_DISCONNECT = const(24)
+_IRQ_L2CAP_RECV = const(25)
+_IRQ_L2CAP_TX_UNSTALLED = const(26)
 */
 
 // Common UUID type.
@@ -245,7 +259,15 @@ int mp_bluetooth_gattc_write(uint16_t conn_handle, uint16_t value_handle, const 
 
 // Initiate MTU exchange for a specific connection using the preferred MTU.
 int mp_bluetooth_gattc_exchange_mtu(uint16_t conn_handle);
-#endif
+#endif // MICROPY_PY_BLUETOOTH_ENABLE_CENTRAL_MODE
+
+#if MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+int mp_bluetooth_l2cap_listen(uint16_t psm, uint16_t mtu);
+int mp_bluetooth_l2cap_connect(uint16_t conn_handle, uint16_t psm, uint16_t mtu);
+int mp_bluetooth_l2cap_disconnect(uint16_t chan_handle);
+int mp_bluetooth_l2cap_send(uint16_t chan_handle, const uint8_t *buf, size_t len, bool *stalled);
+int mp_bluetooth_l2cap_recvinto(uint16_t chan_handle, uint8_t *buf, size_t *len);
+#endif // MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
 
 /////////////////////////////////////////////////////////////////////////////
 // API implemented by modbluetooth (called by port-specific implementations):
@@ -295,7 +317,12 @@ void mp_bluetooth_gattc_on_data_available_end(mp_uint_t atomic_state);
 
 // Notify modbluetooth that a read or write operation has completed.
 void mp_bluetooth_gattc_on_read_write_status(uint8_t event, uint16_t conn_handle, uint16_t value_handle, uint16_t status);
-#endif
+#endif // MICROPY_PY_BLUETOOTH_ENABLE_CENTRAL_MODE
+
+#if MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
+void mp_bluetooth_gattc_on_l2cap_generic(uint8_t event, uint16_t chan_handle);
+void mp_bluetooth_gattc_on_l2cap_tx_unstalled(uint16_t chan_handle, uint8_t status);
+#endif // MICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL
 
 // For stacks that don't manage attribute value data (currently all of them), helpers
 // to store this in a map, keyed by value handle.

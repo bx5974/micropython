@@ -184,6 +184,7 @@ else
 
 # NimBLE is enabled.
 GIT_SUBMODULES += lib/mynewt-nimble
+CFLAGS_MOD += -DMICROPY_PY_BLUETOOTH_ENABLE_L2CAP_CHANNEL=1
 include $(TOP)/extmod/nimble/nimble.mk
 
 endif
